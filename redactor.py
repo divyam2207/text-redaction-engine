@@ -3,9 +3,31 @@ from spacy.language import Language
 import re
 import argparse
 import os
+import sys
+from datetime import datetime
 import glob
-from typing import List, Set
+from typing import List, Set, Dict
 from dataclasses import dataclass, field
+import json
+import nltk #for advance concept redaction
+nltk.download("omw-1.4")
+nltk.download("wordnet")
+from nltk.corpus import wordnet
+
+@dataclass
+class RedactionItem:
+    text: str
+    start_idx: int
+    end_idx: int
+    category: str
+
+@dataclass
+class FileStats:
+    filename: str
+    total_ch: int
+    total_redaction: int
+    redacted_items: List[RedactionItem] = field(default_factory=list)
+    
 
 @dataclass
 class RedactionStats:
@@ -14,15 +36,123 @@ class RedactionStats:
     phones: Set[str] = field(default_factory=set)
     addresses: Set[str] = field(default_factory=set)
     concepts: Set[str] = field(default_factory=set)
+    file_stats: Dict[str, FileStats] = field(default_factory=dict)
+
+    #function to get the stats
+    def statsDict(self):
+
+        return {
+            'summary': {
+                'names': {
+                    'count': len(self.names),
+                    'items': sorted(list(self.names))
+                },
+                'dates': {
+                    'count': len(self.dates),
+                    'items': sorted(list(self.dates))
+                },
+                'phones': {
+                    'count': len(self.phones),
+                    'items': sorted(list(self.phones))
+                },
+                'addresses': {
+                    'count': len(self.addresses),
+                    'items': sorted(list(self.addresses))
+                },
+                'concepts': {
+                    'count': len(self.concepts),
+                    'items': sorted(list(self.concepts))
+                },
+
+            },
+            'files': {
+                filename: {
+                    'total_chars': stats.total_ch,
+                    'total_redaction': stats.total_redaction,
+                    'redacted_items': [
+                        {
+                            'text': item.text,
+                            'start_index': item.start_idx,
+                            'end_index': item.end_idx,
+                            'category': item.category
+                        }
+                        for item in stats.redacted_items
+                    ]
+                }
+                for filename, stats in self.file_stats.items()
+            }
+        }
+    
+    #writing stats to the mentioned stream/file
+    def write_stats(self, output):
+
+        stats_data = self.statsDict()
+        formatted_stats = self._formatStats(stats_data)
+
+        if output in ('stdout', 'stderr'):
+            op_stream = sys.stdout if output == "stdout" else sys.stderr
+            op_stream.write(formatted_stats)
+        else:
+            with open(output, 'w', encoding='utf-8') as f:
+                f.write(formatted_stats)
+    
+    def _formatStats(self, stats_data):
+
+        lines = [
+            "--- REDACTION STATS ---",
+            f"Created on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "\n--- Summary ---"
+        ]
+
+        for cat, data in stats_data['summary'].items():
+            lines.extend([
+                f"\n{cat.upper()}:",
+                f"Total unique items: {data['count']}",
+                f"Items:" if data['items'] else "No items found",
+                "\n".join(f" - {item}" for item in data['items'])
+            ])
+        lines.append("\n --- File Details ---")
+        for filename, file_data in stats_data['files'].items():
+            lines.extend([
+                "\nFile: {filename}",
+                f"Total characters: {file_data['total_chars']}",
+                f"Total redactions: {file_data['total_redaction']}",
+                "\nRedacted items:"
+            ])
+        
+        for item in file_data['redacted_items']:
+            lines.append(
+                f" - [{item['category']}] {item['text']} "
+                f"(indices: {item['start_index']}-{item['end_index']})"
+            )
+        
+        return "\n".join(lines)
+    
+    
 
 class TextRedactor:
-    def __init__(self, model_name: str = "en_core_web_md"):
+    def __init__(self, model_name: str = "en_core_web_lg"):
         self.nlp = spacy.load(model_name)
         self.stats = RedactionStats()
         self._setup_extensions()
         self._register_pipeline_components()
         self._setup_pipeline()
         self.concepts = set()
+    
+    def _add_redacted_items(self, doc, text, start, end, category):
+
+        if doc._.file_stats is None:
+            return
+        
+        item = RedactionItem(
+            text = text,
+            start_idx=start,
+            end_idx=end,
+            category=category
+        )
+
+        doc._.file_stats.redacted_items.append(item)
+        doc._.file_stats.total_redaction += 1
 
     def _setup_extensions(self):
         """Setup custom extensions for spaCy"""
@@ -34,6 +164,8 @@ class TextRedactor:
             spacy.tokens.Doc.set_extension("stats", default=None)
         if not spacy.tokens.Doc.has_extension("concepts"):
             spacy.tokens.Doc.set_extension("concepts", default=set())
+        if not spacy.tokens.Doc.has_extension("file_stats"):
+            spacy.tokens.Doc.set_extension("file_stats", default=None)
 
     def _register_pipeline_components(self):
         """Register the pipeline components with spaCy"""
@@ -52,6 +184,8 @@ class TextRedactor:
                 if ent.label_ in ["PERSON", "ORG"]:
                     spans_to_redact.append((ent.start_char, ent.end_char))
                     stats.names.add(ent.text)
+                    self._add_redacted_items(doc, ent.text, ent.start_char, ent.end_char, "NAME")
+
 
             # Additional patterns for names
             patterns = [
@@ -64,6 +198,8 @@ class TextRedactor:
                 for match in re.finditer(pattern, redacted_text):
                     spans_to_redact.append((match.start(), match.end()))
                     stats.names.add(match.group())
+                    self._add_redacted_items(doc, ent.text, ent.start_char, ent.end_char, "NAME")
+
 
             doc._.redacted_text = TextRedactor._apply_redaction(redacted_text, spans_to_redact)
             doc._.redaction_spans.extend(spans_to_redact)
@@ -99,6 +235,8 @@ class TextRedactor:
                 if ent.label_ in ["DATE", "TIME"]:
                     spans_to_redact.append((ent.start_char, ent.end_char))
                     stats.dates.add(ent.text)
+                    self._add_redacted_items(doc, ent.text, ent.start_char, ent.end_char, "DATE")
+
 
             doc._.redacted_text = TextRedactor._apply_redaction(redacted_text, spans_to_redact)
             doc._.redaction_spans.extend(spans_to_redact)
@@ -147,6 +285,8 @@ class TextRedactor:
                 if ent.label_ in ["GPE", "LOC", "FAC"]:
                     spans_to_redact.append((ent.start_char, ent.end_char))
                     stats.addresses.add(ent.text)
+                    self._add_redacted_items(doc, ent.text, ent.start_char, ent.end_char, "ADDRESS")
+
 
             doc._.redacted_text = TextRedactor._apply_redaction(redacted_text, spans_to_redact)
             doc._.redaction_spans.extend(spans_to_redact)
@@ -158,6 +298,23 @@ class TextRedactor:
             spans_to_redact = []
             stats = doc._.stats
             concepts = doc._.concepts
+
+            nltk_words = nltk.word_tokenize(" ".join(concepts))
+            synonyms = {}
+            for w in nltk_words:
+                synonyms[w] = set()
+                for synset in wordnet.synsets(w):
+                    for lemma in synset.lemmas():
+                        synonyms[w].add(lemma.name())
+            
+            #redact synonys relate to the concepts
+            if synonyms:
+                for key, span in synonyms.items():
+                    for syn in span:
+                        for match in re.finditer(syn, redacted_text):
+                            spans_to_redact.append((match.start(), match.end()))
+                            stats.concepts.add(match.group())
+
 
             if concepts:
                 concept_pattern = r'\b(?:' + '|'.join(map(re.escape, concepts)) + r')\b'
@@ -215,17 +372,25 @@ class TextRedactor:
 
         return ''.join(result)
 
-    def redact_text(self, text: str, concepts: List[str] = None) -> str:
+    def redact_text(self, text: str, filename: str = "default", concepts: List[str] = None) -> str:
         """Main method to redact text"""
         # Initialize document extensions
         doc = self.nlp.make_doc(text)
         doc._.redacted_text = text
-        doc._.stats = RedactionStats()  # Initialize with a new RedactionStats object
+        doc._.stats = self.stats# Initialize with a new RedactionStats object
         doc._.concepts = set(concepts) if concepts else set()
+
+        file_stats = FileStats(
+            filename=filename,
+            total_ch = len(text),
+            total_redaction=0
+        )
+
+        doc._.file_stats = file_stats
+        self.stats.file_stats[filename] = file_stats
         
         # Process through pipeline
         doc = self.nlp(doc)  # Pass the doc object instead of text
-        self.stats = doc._.stats
         return doc._.redacted_text
 
 def main():
@@ -256,23 +421,19 @@ def main():
             text = f.read()
         
         # Perform redaction
-        redacted_text = redactor.redact_text(text, args.concept)
+        redacted_text = redactor.redact_text(
+            text, 
+            filename=os.path.basename(input_file), 
+            concepts = args.concept)
         
         # Write output
-        output_path = os.path.join(args.output, os.path.basename(input_file) + '.redacted')
+        output_path = os.path.join(args.output, os.path.basename(input_file) + '.censored')
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(redacted_text)
-    print(redactor.stats.names)
     
     # Write stats if requested
     if args.stats:
-        with open(args.stats, 'w', encoding='utf-8') as f:
-            f.write("Redaction Statistics:\n")
-            f.write(f"Names: {sorted(redactor.stats.names)}\n")
-            f.write(f"Dates: {sorted(redactor.stats.dates)}\n")
-            f.write(f"Phones: {sorted(redactor.stats.phones)}\n")
-            f.write(f"Addresses: {sorted(redactor.stats.addresses)}\n")
-            f.write(f"Concepts: {sorted(redactor.stats.concepts)}\n")
+        redactor.stats.write_stats(args.stats)
 
 if __name__ == "__main__":
     main()
