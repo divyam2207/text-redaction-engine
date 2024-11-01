@@ -12,6 +12,7 @@ import json
 import nltk #for advance concept redaction
 nltk.download("omw-1.4")
 nltk.download("wordnet")
+nltk.download("punkt")
 from nltk.corpus import wordnet
 
 @dataclass
