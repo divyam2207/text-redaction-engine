@@ -131,7 +131,7 @@ class RedactionStats:
     
 
 class TextRedactor:
-    def __init__(self, model_name: str = "en_core_web_lg"):
+    def __init__(self, model_name: str = "en_core_web_md"):
         self.nlp = spacy.load(model_name)
         self.stats = RedactionStats()
         self._setup_extensions()
