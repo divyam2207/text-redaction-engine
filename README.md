@@ -1,10 +1,6 @@
-# cis6930fa24 -- Project 1
+# Text Redaction Engine
 
-
-Name: Divyam Dubey
-
-
-# Project Description
+## Project Description
 This project implements a text redaction pipeline that automates the process of identifying and censoring sensitive information from text documents. It utilizes a command-line interface to enable users to specify the types of sensitive data they wish to redact, making it flexible for various use cases, such as processing police reports, court transcripts, and hospital records.
 
 We are using the  full block character █ (U+2588) to redact the words based on our parameters. And we are using SPACY's doc object entities to span the word length, based on that we are not redacting the whitespaces, while for concept redaction, nltk redacts the spaces between words as well. The white space redaction is required to achieve complete abstraction, not letting even the context of redacted words be leaked out.
